@@ -4,8 +4,6 @@ const Io = std.Io;
 const cdlscatedit = @import("cdlscatedit");
 
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
 
     // This is appropriate for anything that lives as long as the process.
     const arena: std.mem.Allocator = init.arena.allocator();
@@ -19,14 +17,16 @@ pub fn main(init: std.process.Init) !void {
     // In order to do I/O operations need an `Io` instance.
     const io = init.io;
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    try cdlscatedit.printAnotherMessage(stdout_writer);
+    var dir = try std.Io.Dir.cwd().openDir(io, ".", .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        try cdlscatedit.print(entry.name, stdout_writer);
+    }
 
     try stdout_writer.flush(); // Don't forget to flush!
 }
@@ -45,7 +45,7 @@ test "fuzz example" {
 
 fn testOne(context: void, smith: *std.testing.Smith) !void {
     _ = context;
-    // Try command `zig build test --fuzz -Doptimize=ReleaseFast` to see if it manages to fail this test case!
+    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
 
     const gpa = std.testing.allocator;
     var list: std.ArrayList(u8) = .empty;
