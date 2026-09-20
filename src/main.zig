@@ -1,71 +1,175 @@
-const std = @import("std");
-const Io = std.Io;
+//! ZigZag File Browser Example
+//! Demonstrates the FilePicker component for file system navigation.
 
-const cdlscatedit = @import("cdlscatedit");
+const std = @import("std");
+
+const zz = @import("zigzag");
+
+const Model = struct {
+    file_picker: zz.components.FilePicker,
+    preview: std.array_list.Managed(u8),
+    error_message: []const u8,
+
+    pub const Msg = union(enum) {
+        key: zz.KeyEvent,
+    };
+
+    pub fn init(self: *Model, ctx: *zz.Context) !zz.Cmd(Msg) {
+        self.file_picker = zz.components.FilePicker.init(ctx.persistent_allocator);
+        self.file_picker.height = ctx.height -| 10;
+        self.file_picker.setHomePath(ctx.home_dir);
+
+        // Start at home directory
+        self.file_picker.navigateHome(ctx.io) catch {
+            try self.file_picker.navigate(ctx.io, "/");
+        };
+
+        self.preview = std.array_list.Managed(u8).init(ctx.persistent_allocator);
+        self.error_message = "";
+        return .none;
+    }
+
+    pub fn update(self: *Model, msg: Msg, ctx: *zz.Context) zz.Cmd(Msg) {
+        switch (msg) {
+            .key => |k| {
+                switch (k.key) {
+                    .char => |c| switch (c) {
+                        'q' => return .quit,
+                        else => {
+                            const selected = self.file_picker.handleKey(ctx.io, k) catch false;
+                            if (selected) {
+                                self.loadPreview(ctx.io);
+                            }
+                        },
+                    },
+                    .escape => return .quit,
+                    else => {
+                        const selected = self.file_picker.handleKey(ctx.io, k) catch false;
+                        if (selected) {
+                            self.loadPreview(ctx.io);
+                        }
+                    },
+                }
+
+                // Update height based on context
+                self.file_picker.height = ctx.height -| 10;
+            },
+        }
+        return .none;
+    }
+
+    fn loadPreview(self: *Model, io: std.Io) void {
+        if (self.file_picker.getSelected()) |path| {
+            // Try to read file preview
+            const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch {
+                self.error_message = "Cannot open file";
+                self.preview.clearRetainingCapacity();
+                return;
+            };
+            defer file.close(io);
+
+            // Read first 500 bytes
+            var buf: [500]u8 = undefined;
+            const bytes_read = file.readPositionalAll(io, &buf, 0) catch {
+                self.error_message = "Cannot read file";
+                self.preview.clearRetainingCapacity();
+                return;
+            };
+
+            self.preview.clearRetainingCapacity();
+            self.preview.appendSlice(buf[0..bytes_read]) catch {
+                self.error_message = "Out of memory";
+                self.preview.clearRetainingCapacity();
+                return;
+            };
+            self.error_message = "";
+        }
+    }
+
+    pub fn view(self: *const Model, ctx: *const zz.Context) ![]const u8 {
+        // Title
+        var title_style = zz.Style{};
+        title_style = title_style.bold(true);
+        title_style = title_style.fg(zz.Color.cyan);
+        title_style = title_style.inline_style(true);
+        const title = try title_style.render(ctx.allocator, "File Browser");
+
+        // File picker
+        const picker_view = try self.file_picker.view(ctx.allocator);
+
+        // Preview section
+        var preview_section: []const u8 = "";
+        if (self.file_picker.getSelected()) |path| {
+            var path_style = zz.Style{};
+            path_style = path_style.fg(zz.Color.green);
+            path_style = path_style.inline_style(true);
+            const path_display = try path_style.render(ctx.allocator, path);
+
+            var preview_style = zz.Style{};
+            preview_style = preview_style.borderAll(zz.Border.normal);
+            preview_style = preview_style.borderForeground(zz.Color.gray(12));
+
+            const preview_content = if (self.preview.items.len > 0)
+                self.preview.items
+            else if (self.error_message.len > 0)
+                self.error_message
+            else
+                "(empty file)";
+
+            const preview_box = try preview_style.render(ctx.allocator, preview_content);
+
+            preview_section = try std.fmt.allocPrint(
+                ctx.allocator,
+                "\nSelected: {s}\n\n{s}",
+                .{ path_display, preview_box },
+            );
+        }
+
+        // Help
+        var help_style = zz.Style{};
+        help_style = help_style.fg(zz.Color.gray(12));
+        help_style = help_style.inline_style(true);
+        const help = try help_style.render(
+            ctx.allocator,
+            "Up/Down: Navigate  Enter: Open/Select  Backspace: Parent  h: Toggle hidden  ~: Home  q: Quit",
+        );
+
+        // Get max width for centering title and help
+        const picker_width = zz.measure.maxLineWidth(picker_view);
+        const title_width = zz.measure.width(title);
+        const help_width = zz.measure.width(help);
+        const max_width = @max(picker_width, @max(title_width, help_width));
+
+        // Center title and help
+        const centered_title = try zz.place.place(ctx.allocator, max_width, 1, .center, .top, title);
+        const centered_help = try zz.place.place(ctx.allocator, max_width, 1, .center, .top, help);
+
+        const content = try std.fmt.allocPrint(
+            ctx.allocator,
+            "{s}\n\n{s}{s}\n\n{s}",
+            .{ centered_title, picker_view, preview_section, centered_help },
+        );
+
+        // Center horizontally but keep at top vertically (file browser needs vertical space)
+        return zz.place.place(
+            ctx.allocator,
+            ctx.width,
+            ctx.height,
+            .center,
+            .top,
+            content,
+        );
+    }
+
+    pub fn deinit(self: *Model) void {
+        self.file_picker.deinit();
+        self.preview.deinit();
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
+    var program = zz.Program(Model).init(init.gpa, init.io, init.environ_map);
+    defer program.deinit();
 
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
-
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
-
-    var dir = try std.Io.Dir.cwd().openDir(io, ".", .{ .iterate = true });
-    defer dir.close(io);
-    var iterator = dir.iterate();
-    while (try iterator.next(io)) |entry| {
-        try cdlscatedit.print(entry.name, stdout_writer);
-    }
-
-    try stdout_writer.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
-    };
+    try program.run();
 }
